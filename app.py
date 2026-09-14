@@ -1,76 +1,106 @@
 import streamlit as st
-import pandas as pd
+import streamlit.components.v1 as components
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForMaskedLM
+import os
 
-# 1. Page Configuration
-st.set_page_config(page_title="EvoScore Scanner", page_icon="🧬", layout="centered")
-st.title("🧬 EvoScore: Zero-Shot Scanner")
-st.write("Predict the stability of amino acid substitutions using the ESM-2 protein language model.")
+# 1. Hide default Streamlit UI to let your HTML take over
+st.set_page_config(page_title="EvoScore Scanner", layout="wide", initial_sidebar_state="collapsed")
+st.markdown("""
+    <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        .block-container {padding: 0rem; max-width: 100%;}
+    </style>
+""", unsafe_allow_html=True)
 
-# 2. Cache the heavy model so it only loads ONCE
+# 2. Cache the AI engine
 @st.cache_resource
 def load_model():
     model_name = "facebook/esm2_t33_650M_UR50D"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    # Automatically use GPU if available, otherwise use CPU for local testing
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = AutoModelForMaskedLM.from_pretrained(model_name).to(device).eval()
     return tokenizer, model, device
 
-with st.spinner("Loading AI Engine... (This will download 2.6GB on the very first run)"):
+with st.spinner("Warming up ESM-2 Engine..."):
     tokenizer, model, device = load_model()
 
-# 3. Sidebar for User Inputs
-st.sidebar.header("Input Parameters")
-sequence = st.sidebar.text_input("Wild-Type Sequence", value="MQIFVKTLTG").upper()
-position = st.sidebar.number_input("Position to Scan", min_value=1, max_value=len(sequence) if sequence else 100, value=4, step=1)
+# 3. Connect to your 'frontend' folder
+parent_dir = os.path.dirname(os.path.abspath(__file__))
+frontend_dir = os.path.join(parent_dir, "frontend")
+evoscore_ui = components.declare_component("evoscore_ui", path=frontend_dir)
 
-# 4. The Core AI Logic
-def scan_position(sequence, position, tokenizer, model, device):
-    original_aa = sequence[position - 1]
-    inputs = tokenizer(sequence, return_tensors="pt").to(device)
-    inputs["input_ids"][0, position] = tokenizer.mask_token_id
+# 4. Initialize Data Trackers
+if "results" not in st.session_state:
+    st.session_state.results = []
+if "results_nonce" not in st.session_state:
+    st.session_state.results_nonce = None
+if "error" not in st.session_state:
+    st.session_state.error = None
+if "sequence" not in st.session_state:
+    st.session_state.sequence = "MQIFVKTLTG"
+if "index" not in st.session_state:
+    st.session_state.index = 4
 
-    with torch.no_grad():
-        output = model(**inputs)
+# 5. Render your HTML interface
+component_value = evoscore_ui(
+    sequence=st.session_state.sequence,
+    index=st.session_state.index,
+    results=st.session_state.results,
+    results_nonce=st.session_state.results_nonce,
+    error=st.session_state.error,
+    height=1000,
+    key="evo_bridge"
+)
 
-    raw_scores = output.logits[0, position]
-    log_probs = F.log_softmax(raw_scores, dim=-1)
-    wt_log_prob = log_probs[tokenizer.convert_tokens_to_ids(original_aa)].item()
-
-    results = []
-    for aa in list("ACDEFGHIKLMNPQRSTVWY"):
-        aa_id = tokenizer.convert_tokens_to_ids(aa)
-        llr = log_probs[aa_id].item() - wt_log_prob
-        results.append({
-            "Mutation": f"{original_aa}{position}{aa}",
-            "Substitute": aa,
-            "Score": round(llr, 3)
-        })
+# 6. Listen for the user clicking "Execute Pipeline"
+if component_value and component_value.get("action") == "scan":
+    incoming_nonce = component_value.get("nonce")
+    
+    # Only run the math if this is a new request
+    if incoming_nonce != st.session_state.results_nonce:
+        seq = component_value.get("sequence", "").upper()
+        idx = component_value.get("index")
         
-    return pd.DataFrame(results).sort_values(by="Score", ascending=False)
+        st.session_state.sequence = seq
+        st.session_state.index = idx
+        
+        try:
+            wt_aa = seq[idx - 1]
+            inputs = tokenizer(seq, return_tensors="pt").to(device)
+            inputs["input_ids"][0, idx] = tokenizer.mask_token_id
 
-# 5. The User Action (Clicking the Button)
-if st.button("Run Evolutionary Scan", type="primary"):
-    if not sequence:
-        st.error("Please enter a valid sequence.")
-    elif position > len(sequence):
-        st.error("Position out of bounds.")
-    else:
-        with st.spinner(f"Scoring all 20 mutations at position {position}..."):
-            results_df = scan_position(sequence, int(position), tokenizer, model, device)
+            with torch.no_grad():
+                output = model(**inputs)
+
+            raw_scores = output.logits[0, idx]
+            log_probs = F.log_softmax(raw_scores, dim=-1)
+            wt_log_prob = log_probs[tokenizer.convert_tokens_to_ids(wt_aa)].item()
+
+            results = []
+            for aa in list("ACDEFGHIKLMNPQRSTVWY"):
+                if aa == wt_aa:
+                    results.append({"mutation": f"{wt_aa}{idx}{aa}", "substitute": aa, "score": 0.0, "wt": True})
+                else:
+                    aa_id = tokenizer.convert_tokens_to_ids(aa)
+                    llr = log_probs[aa_id].item() - wt_log_prob
+                    results.append({
+                        "mutation": f"{wt_aa}{idx}{aa}",
+                        "substitute": aa,
+                        "score": round(llr, 3),
+                        "wt": False
+                    })
             
-            st.success(f"Scan complete! Original Amino Acid: {sequence[position-1]}")
+            st.session_state.results = sorted(results, key=lambda x: x["score"], reverse=True)
+            st.session_state.error = None
             
-            # Display colorful table
-            def color_scores(val):
-                color = '#d4edda' if val > 0 else '#f8d7da' if val < 0 else '#fff3cd'
-                return f'background-color: {color}; color: black'
+        except Exception as e:
+            st.session_state.error = str(e)
+            st.session_state.results = []
             
-            st.dataframe(results_df.style.map(color_scores, subset=['Score']), use_container_width=True)
-            
-            # Provide a one-click CSV download
-            csv = results_df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Results (CSV)", data=csv, file_name=f"EvoScore_Pos{position}.csv", mime="text/csv")
+        # Confirm completion and send data back to HTML
+        st.session_state.results_nonce = incoming_nonce
+        st.rerun()
