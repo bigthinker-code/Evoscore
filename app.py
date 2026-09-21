@@ -5,6 +5,11 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForMaskedLM
 import os
 
+st.write("Files on server:", os.listdir("."))
+if os.path.exists("frontend"):
+    st.write("Inside frontend:", os.listdir("frontend"))
+else:
+    st.error("The frontend folder is MISSING on the server!")
 # 1. Hide default Streamlit UI to let your HTML take over
 st.set_page_config(page_title="EvoScore Scanner", layout="wide", initial_sidebar_state="collapsed")
 st.markdown("""
