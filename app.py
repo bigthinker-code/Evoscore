@@ -29,9 +29,7 @@ with st.spinner("Warming up ESM-2 Engine..."):
     tokenizer, model, device = load_model()
 
 # 3. Connect to your 'frontend' folder
-parent_dir = os.path.dirname(os.path.abspath(__file__))
-frontend_dir = os.path.join(parent_dir, "frontend")
-evoscore_ui = components.declare_component("evoscore_ui", path=frontend_dir)
+evoscore_ui = components.declare_component("evoscore_ui", path="frontend")
 
 # 4. Initialize Data Trackers
 if "results" not in st.session_state:
